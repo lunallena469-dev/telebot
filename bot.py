@@ -1,13 +1,7 @@
-import telegram
+import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, ChatMemberHandler, MessageHandler, Filters, CallbackQueryHandler
-import threading
-
-# Token del bot
-TOKEN = "8075777545:AAFaoOeTcf-z6SuB69TTjMwZOjrgLoGV1tg"
-
-# Diccionario para rastrear usuarios pendientes
-pending_users = {}
+from telegram.error import TelegramError
 
 # Mensaje de bienvenida
 WELCOME_MESSAGE = (
@@ -20,12 +14,17 @@ WELCOME_MESSAGE = (
     "🔘 Presiona el botón abajo para verificar que no eres un bot."
 )
 
+# Diccionario para rastrear usuarios pendientes
+pending_users = {}
+
 # Función para expulsar al usuario
-def kick_user(context, chat_id, user_id):
+def kick_user(context):
+    chat_id, user_id = context.job.context
     try:
         context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
         pending_users.pop(user_id, None)  # Elimina al usuario de la lista
-    except Exception as e:
+        context.bot.send_message(chat_id=chat_id, text=f"El usuario {user_id} fue expulsado por no enviar la imagen.")
+    except TelegramError as e:
         print(f"Error al expulsar al usuario {user_id}: {e}")
 
 # Manejar nuevos miembros
@@ -34,17 +33,20 @@ def handle_new_member(update, context):
     if chat_member.new_chat_member.status == "member":
         user_id = chat_member.new_chat_member.user.id
         chat_id = chat_member.chat.id
+        username = chat_member.new_chat_member.user.username or "Usuario"
 
         # Crea el botón inline
         keyboard = [[InlineKeyboardButton("Verificar", callback_data=f"verify_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Envía el mensaje
-        context.bot.send_message(chat_id=chat_id, text=WELCOME_MESSAGE, reply_markup=reply_markup)
-
-        # Programa la expulsión en 60 segundos
-        job = context.job_queue.run_once(kick_user, 60, context=(chat_id, user_id))
-        pending_users[user_id] = job  # Almacena la tarea
+        try:
+            context.bot.send_message(chat_id=chat_id, text=WELCOME_MESSAGE, reply_markup=reply_markup)
+            # Programa la expulsión en 60 segundos
+            job = context.job_queue.run_once(kick_user, 60, context=(chat_id, user_id))
+            pending_users[user_id] = job  # Almacena la tarea
+        except TelegramError as e:
+            print(f"Error al enviar mensaje a {user_id}: {e}")
 
 # Manejar mensajes con foto o video
 def handle_media(update, context):
@@ -54,19 +56,26 @@ def handle_media(update, context):
             # Cancela la expulsión si envía foto o video
             job = pending_users.pop(user_id)
             job.schedule_removal()
-            context.bot.send_message(chat_id=update.message.chat_id, text="¡Gracias! Has pasado la verificación.")
+            context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"¡Gracias, @{update.message.from_user.username or 'Usuario'}! Has pasado la verificación."
+            )
 
 # Manejar el botón
 def handle_button(update, context):
     query = update.callback_query
     user_id = int(query.data.split("_")[1])
     if user_id in pending_users:
-        query.answer("Gracias por verificar, pero aún necesitas enviar una imagen.")
+        query.answer("Gracias por verificar, pero aún necesitas enviar una imagen o video.")
     else:
         query.answer("Ya estás verificado.")
 
-# Configuración del bot
 def main():
+    # Obtiene el token desde las variables de entorno
+    TOKEN = os.getenv("TOKEN")
+    if not TOKEN:
+        raise ValueError("El token de Telegram no está configurado en las variables de entorno.")
+
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
